@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		E01000000000000000000001 /* EqualizerWindowController.mm in Sources */ = {isa = PBXBuildFile; fileRef = E01000000000000000000002 /* EqualizerWindowController.mm */; };
 		2D46CA7B17D6ADCA00049D4A /* Localizable.strings in Resources */ = {isa = PBXBuildFile; fileRef = 2D46CA7817D6AD8A00049D4A /* Localizable.strings */; };
 		2D46CA7D17D6AF4200049D4A /* DeviceIcon.icns in Resources */ = {isa = PBXBuildFile; fileRef = 2D46CA7C17D6AF4200049D4A /* DeviceIcon.icns */; };
 		2D616EF415B8C82500D598BD /* ProxyAudioDevice.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 2D616EF215B8C82500D598BD /* ProxyAudioDevice.cpp */; };
@@ -44,6 +45,10 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		E01000000000000000000002 /* EqualizerWindowController.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = EqualizerWindowController.mm; sourceTree = "<group>"; };
+		E01000000000000000000003 /* EqualizerWindowController.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = EqualizerWindowController.h; sourceTree = "<group>"; };
+		E01000000000000000000004 /* Equalizer.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = Equalizer.h; sourceTree = "<group>"; };
+		E01000000000000000000005 /* EqualizerSettings.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = EqualizerSettings.h; sourceTree = "<group>"; };
 		2D46CA7917D6AD8A00049D4A /* English */ = {isa = PBXFileReference; fileEncoding = 10; lastKnownFileType = text.plist.strings; name = English; path = English.lproj/Localizable.strings; sourceTree = "<group>"; };
 		2D46CA7C17D6AF4200049D4A /* DeviceIcon.icns */ = {isa = PBXFileReference; lastKnownFileType = image.icns; path = DeviceIcon.icns; sourceTree = "<group>"; };
 		2D616EF115B8C82500D598BD /* Info.plist */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
@@ -74,7 +79,7 @@
 		77B27C6223329F2400DA04FD /* Proxy Audio Device Settings.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = "Proxy Audio Device Settings.entitlements"; sourceTree = "<group>"; };
 		77C548122211F5240041623A /* ProxyAudioDevice.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = ProxyAudioDevice.h; sourceTree = "<group>"; };
 		77CAB5622212252F0092B2B0 /* AppKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AppKit.framework; path = System/Library/Frameworks/AppKit.framework; sourceTree = SDKROOT; };
-		77CAB568221534640092B2B0 /* Proxy Audio Device Settings.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Proxy Audio Device Settings.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		77CAB568221534640092B2B0 /* Proxy Audio Device.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Proxy Audio Device.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		77CAB56A221534640092B2B0 /* AppDelegate.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = AppDelegate.h; sourceTree = "<group>"; };
 		77CAB56B221534640092B2B0 /* AppDelegate.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = AppDelegate.m; sourceTree = "<group>"; };
 		77CAB56D221534650092B2B0 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
@@ -117,6 +122,7 @@
 		2D616EF015B8C82500D598BD /* proxyAudioDevice */ = {
 			isa = PBXGroup;
 			children = (
+				E01000000000000000000004 /* Equalizer.h */,
 				2D46CA7C17D6AF4200049D4A /* DeviceIcon.icns */,
 				2D46CA7817D6AD8A00049D4A /* Localizable.strings */,
 				2D616EF115B8C82500D598BD /* Info.plist */,
@@ -148,7 +154,7 @@
 			isa = PBXGroup;
 			children = (
 				2D7477A91578168D00412279 /* ProxyAudioDevice.driver */,
-				77CAB568221534640092B2B0 /* Proxy Audio Device Settings.app */,
+				77CAB568221534640092B2B0 /* Proxy Audio Device.app */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -187,6 +193,8 @@
 		77CAB569221534640092B2B0 /* ProxyAudioDeviceSettings */ = {
 			isa = PBXGroup;
 			children = (
+				E01000000000000000000002 /* EqualizerWindowController.mm */,
+				E01000000000000000000003 /* EqualizerWindowController.h */,
 				77CAB56A221534640092B2B0 /* AppDelegate.h */,
 				77CAB56B221534640092B2B0 /* AppDelegate.m */,
 				77CAB57A22153A2D0092B2B0 /* WindowDelegate.h */,
@@ -204,6 +212,7 @@
 		77CAB57D22153C9A0092B2B0 /* shared */ = {
 			isa = PBXGroup;
 			children = (
+				E01000000000000000000005 /* EqualizerSettings.h */,
 				776E4F522208101300AE0417 /* AudioDevice.cpp */,
 				776E4F512208101300AE0417 /* AudioDevice.h */,
 				7799CEA3220EA68200A3DB04 /* CFTypeHelpers.h */,
@@ -245,8 +254,8 @@
 				7708C827221547EB00D4B814 /* PBXTargetDependency */,
 			);
 			name = "Proxy Audio Device Settings";
-			productName = "Proxy Audio Device Settings";
-			productReference = 77CAB568221534640092B2B0 /* Proxy Audio Device Settings.app */;
+			productName = "Proxy Audio Device";
+			productReference = 77CAB568221534640092B2B0 /* Proxy Audio Device.app */;
 			productType = "com.apple.product-type.application";
 		};
 /* End PBXNativeTarget section */
@@ -338,6 +347,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				E01000000000000000000001 /* EqualizerWindowController.mm in Sources */,
 				77CAB57C22153A2D0092B2B0 /* WindowDelegate.mm in Sources */,
 				77CAB574221534650092B2B0 /* main.m in Sources */,
 				77CAB57E22153CA40092B2B0 /* AudioDevice.cpp in Sources */,
@@ -658,7 +668,7 @@
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				PRODUCT_BUNDLE_IDENTIFIER = "net.briankendall.Proxy-Audio-Device-Settings";
-				PRODUCT_NAME = "$(TARGET_NAME)";
+				PRODUCT_NAME = "Proxy Audio Device";
 				PROVISIONING_PROFILE_SPECIFIER = "";
 				STRIP_INSTALLED_PRODUCT = NO;
 				STRIP_SWIFT_SYMBOLS = NO;
@@ -703,7 +713,7 @@
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				PRODUCT_BUNDLE_IDENTIFIER = "net.briankendall.Proxy-Audio-Device-Settings";
-				PRODUCT_NAME = "$(TARGET_NAME)";
+				PRODUCT_NAME = "Proxy Audio Device";
 				STRIP_INSTALLED_PRODUCT = NO;
 				STRIP_SWIFT_SYMBOLS = NO;
 			};
@@ -747,7 +757,7 @@
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				PRODUCT_BUNDLE_IDENTIFIER = "net.briankendall.Proxy-Audio-Device-Settings";
-				PRODUCT_NAME = "$(TARGET_NAME)";
+				PRODUCT_NAME = "Proxy Audio Device";
 				STRIP_INSTALLED_PRODUCT = NO;
 				STRIP_SWIFT_SYMBOLS = NO;
 			};

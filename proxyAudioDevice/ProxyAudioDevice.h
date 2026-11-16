@@ -8,6 +8,7 @@
 
 #include "AudioDevice.h"
 #include "CAMutex.h"
+#include "Equalizer.h"
 
 class AudioRingBuffer;
 
@@ -133,6 +134,8 @@ class ProxyAudioDevice {
     bool retrieveOutputDeviceHideWhenUnavailableFromStorage();
     void setOutputDeviceHideWhenUnavailable(bool newHideWhenUnavailable);
     void notifyHiddenPropertyChanged();
+    void loadEqualizerSettings();
+    OSStatus setEqualizerSettings(CFPropertyListRef data);
 
     static ProxyAudioDevice *deviceForDriver(void *inDriver);
 
@@ -515,6 +518,10 @@ class ProxyAudioDevice {
     AudioRingBuffer *inputBuffer = NULL;
     Byte *workBuffer = NULL;
     AudioDevice outputDevice;
+    CAMutex equalizerSettingsMutex = CAMutex("ProxyAudioEqualizerSettingsMutex");
+    Equalizer::Settings equalizerSettings;
+    Equalizer::Plan equalizerPlan = Equalizer::makePlan(equalizerSettings, 44100, 1);
+    Equalizer::Processor equalizer;
     bool outputDeviceReady = false;
     std::atomic_bool inputIOIsActive;
     Float64 lastInputFrameTime = -1;

@@ -9,9 +9,23 @@ int onDevicesChanged(AudioObjectID inObjectID,
                      const AudioObjectPropertyAddress *inAddresses,
                      void *inClientData);
 
+static NSString *const SwitchOnConnectKey = @"SwitchToProxyWhenSourceConnected";
+static NSString *const SwitchOnDisconnectKey = @"SwitchToDefaultWhenSourceDisconnected";
+static NSString *const FallbackDeviceUIDKey = @"FallbackOutputDeviceUID";
+static NSString *const FallbackDeviceNameKey = @"FallbackOutputDeviceName";
+
 @implementation WindowDelegate {
     std::vector<AudioDeviceID> currentDeviceList;
     int initializationAttemptInterval;
+    BOOL devicesListenerInstalled;
+    NSString *observedSourceUID;
+    AudioDeviceID observedSourceID;
+    BOOL sourceWasConnected;
+    NSString *pendingOutputUID;
+    NSTimer *routingRetryTimer;
+    unsigned routingAttempts;
+    NSTimer *sourceStateRetryTimer;
+    unsigned sourceStateAttempts;
 }
 
 - (void)awakeFromNib {
@@ -23,6 +37,11 @@ int onDevicesChanged(AudioObjectID inObjectID,
     self.userIsActiveRadioButton.enabled = NO;
     self.alwaysRadioButton.enabled = NO;
     self.hideWhenUnavailableCheckbox.enabled = NO;
+    self.switchOnConnectCheckbox.enabled = NO;
+    self.switchOnDisconnectCheckbox.enabled = NO;
+    self.fallbackDevicePopUp.enabled = NO;
+    self.switchOnConnectCheckbox.state = [[self routingDefaults] boolForKey:SwitchOnConnectKey];
+    self.switchOnDisconnectCheckbox.state = [[self routingDefaults] boolForKey:SwitchOnDisconnectKey];
     initializationAttemptInterval = 3;
     [self keepTryingToInitializeUntilSuccess];
 }
@@ -71,6 +90,8 @@ int onDevicesChanged(AudioObjectID inObjectID,
     self.userIsActiveRadioButton.enabled = YES;
     self.alwaysRadioButton.enabled = YES;
     self.hideWhenUnavailableCheckbox.enabled = YES;
+    self.switchOnConnectCheckbox.enabled = YES;
+    self.switchOnDisconnectCheckbox.enabled = YES;
     self.hideWhenUnavailableCheckbox.state =
         [self currentHideWhenUnavailable] ? NSControlStateValueOn : NSControlStateValueOff;
 
@@ -125,16 +146,19 @@ int onDevicesChanged(AudioObjectID inObjectID,
 }
 
 - (bool)setupListenerForCurrentAudioDevices {
+    if (devicesListenerInstalled)
+        return true;
     AudioObjectPropertyAddress listenerPropertyAddress = {
         kAudioHardwarePropertyDevices, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMaster};
     OSStatus err =
         AudioObjectAddPropertyListener(kAudioObjectSystemObject, &listenerPropertyAddress, &onDevicesChanged, (__bridge_retained void *)self);
 
     if (err != noErr) {
+        CFRelease((__bridge CFTypeRef)self);
         NSLog(@"Error: could not set up listener for audio devices changing");
         return false;
     }
-    
+    devicesListenerInstalled = YES;
     return true;
 }
 
@@ -166,48 +190,101 @@ int onDevicesChanged(AudioObjectID inObjectID,
 }
 
 - (AudioDeviceID)currentOutputDevice {
+    return AudioDevice::audioDeviceIDForDeviceUID((__bridge CFStringRef)[self currentOutputDeviceUID]);
+}
+
+- (NSString *)currentOutputDeviceUID {
     AudioDeviceID proxyAudioBox = AudioDevice::audioDeviceIDForBoxUID(CFSTR(kBox_UID));
-    AudioDevice::setIdentifyValue(proxyAudioBox, -((SInt32)ProxyAudioDevice::ConfigType::outputDevice));
+    if (proxyAudioBox == kAudioObjectUnknown
+        || !AudioDevice::setIdentifyValue(proxyAudioBox, -((SInt32)ProxyAudioDevice::ConfigType::outputDevice))) {
+        NSLog(@"Error: unable to read the configured source device");
+        return nil;
+    }
     NSString *outputDeviceUID = (__bridge_transfer NSString *)AudioDevice::copyObjectName(proxyAudioBox);
-    
-    return AudioDevice::audioDeviceIDForDeviceUID((__bridge_retained CFStringRef)outputDeviceUID);
+    return outputDeviceUID;
 }
 
 - (bool)refreshOutputDevices {
+    [sourceStateRetryTimer invalidate];
+    sourceStateRetryTimer = nil;
     bool success = false;
     [self.outputDeviceComboBox removeAllItems];
-    currentDeviceList = AudioDevice::devicesWithOutputCapabilitiesThatAreNotProxyAudioDevice();
-    AudioDeviceID outputDevice = [self currentOutputDevice];
-    
-    for (unsigned int i = 0; i < currentDeviceList.size(); ++i) {
-        NSString *deviceName = (__bridge_transfer NSString *)AudioDevice::copyObjectName(currentDeviceList[i]);
+    [self.fallbackDevicePopUp removeAllItems];
+    self.fallbackDevicePopUp.menu.autoenablesItems = NO;
+    [self.fallbackDevicePopUp addItemWithTitle:NSLocalizedString(@"Select a fallback device", nil)];
+    self.fallbackDevicePopUp.lastItem.enabled = NO;
+    currentDeviceList.clear();
+    NSString *sourceUID = [self currentOutputDeviceUID];
+    if (!sourceUID.length)
+        return false;
+    AudioDeviceID outputDevice = AudioDevice::audioDeviceIDForDeviceUID((__bridge CFStringRef)sourceUID);
+    NSString *fallbackUID = [[self routingDefaults] stringForKey:FallbackDeviceUIDKey];
+    NSString *suggestedUID = nil;
+    AudioDeviceID defaultOutput = AudioDevice::defaultOutputDevice();
+
+    for (AudioDeviceID device : AudioDevice::devicesWithOutputCapabilitiesThatAreNotProxyAudioDevice()) {
+        NSString *deviceName = (__bridge_transfer NSString *)AudioDevice::copyObjectName(device);
+        NSString *uid = (__bridge_transfer NSString *)AudioDevice::copyDeviceUID(device);
         
-        if (!deviceName) {
-            NSLog(@"Note: got null device name for audio device with device with ID: %d", currentDeviceList[i]);
+        if (!deviceName.length || !uid.length) {
+            NSLog(@"Error: unable to read the name or UID of output device %u", device);
             continue;
         }
-        
+        currentDeviceList.push_back(device);
         [self.outputDeviceComboBox addItemWithObjectValue:deviceName];
         
-        if (outputDevice == currentDeviceList[i]) {
-            [self.outputDeviceComboBox selectItemAtIndex:i];
+        if (outputDevice == device) {
+            [self.outputDeviceComboBox selectItemAtIndex:currentDeviceList.size() - 1];
+        } else {
+            [self.fallbackDevicePopUp addItemWithTitle:deviceName];
+            self.fallbackDevicePopUp.lastItem.representedObject = uid;
+            UInt32 transport = 0, size = sizeof(transport);
+            AudioObjectPropertyAddress address = {kAudioDevicePropertyTransportType, kAudioObjectPropertyScopeGlobal, 0};
+            OSStatus status = AudioObjectGetPropertyData(device, &address, 0, NULL, &size, &transport);
+            if (status != noErr) {
+                NSLog(@"Error: unable to read output device transport (%d)", status);
+            } else if (transport == kAudioDeviceTransportTypeBuiltIn) {
+                suggestedUID = uid;
+            }
+            if (!suggestedUID && device == defaultOutput)
+                suggestedUID = uid;
         }
-        
         success = true;
     }
-    
+    if (self.outputDeviceComboBox.indexOfSelectedItem < 0)
+        self.outputDeviceComboBox.stringValue = NSLocalizedString(@"< Source device disconnected >", nil);
+    if (!fallbackUID.length && suggestedUID.length)
+        fallbackUID = suggestedUID;
+    for (NSMenuItem *item in self.fallbackDevicePopUp.itemArray) {
+        if ([item.representedObject isEqual:fallbackUID]) {
+            [self.fallbackDevicePopUp selectItem:item];
+            [[self routingDefaults] setObject:fallbackUID forKey:FallbackDeviceUIDKey];
+            [[self routingDefaults] setObject:item.title forKey:FallbackDeviceNameKey];
+            break;
+        }
+    }
+    if (fallbackUID.length && !self.fallbackDevicePopUp.selectedItem.representedObject) {
+        NSString *name = [[self routingDefaults] stringForKey:FallbackDeviceNameKey] ?: fallbackUID;
+        [self.fallbackDevicePopUp addItemWithTitle:
+            [NSString stringWithFormat:NSLocalizedString(@"%@ (unavailable)", nil), name]];
+        self.fallbackDevicePopUp.lastItem.representedObject = fallbackUID;
+        self.fallbackDevicePopUp.lastItem.enabled = NO;
+        [self.fallbackDevicePopUp selectItem:self.fallbackDevicePopUp.lastItem];
+    }
+    self.fallbackDevicePopUp.enabled = self.fallbackDevicePopUp.numberOfItems > 1;
     if (!success) {
         NSLog(@"Error: failed to get any information about current output devices!");
+        return false;
     }
-    
-    return success;
+    [self updateAutomaticRoutingForSourceUID:sourceUID device:outputDevice];
+    return true;
 }
 
 - (IBAction)outputDeviceSelected:(id)sender {
 #pragma unused(sender)
-    unsigned long index = (unsigned long)self.outputDeviceComboBox.indexOfSelectedItem;
+    NSInteger index = self.outputDeviceComboBox.indexOfSelectedItem;
     
-    if (index < 0 || index >= currentDeviceList.size()) {
+    if (index < 0 || static_cast<size_t>(index) >= currentDeviceList.size()) {
         NSLog(@"Error: got invalid selection index when trying to set output device");
         return;
     }
@@ -222,6 +299,123 @@ int onDevicesChanged(AudioObjectID inObjectID,
     AudioDeviceID proxyAudioBox = AudioDevice::audioDeviceIDForBoxUID(CFSTR(kBox_UID));
     AudioDevice::setObjectName(proxyAudioBox,
                                (__bridge_retained CFStringRef)[NSString stringWithFormat:@"outputDevice=%@", uid]);
+    [self refreshOutputDevices];
+}
+
+- (NSUserDefaults *)routingDefaults {
+    return [NSUserDefaults standardUserDefaults];
+}
+
+- (void)cancelPendingOutputSwitch {
+    [routingRetryTimer invalidate];
+    routingRetryTimer = nil;
+    pendingOutputUID = nil;
+}
+
+- (void)attemptPendingOutputSwitch {
+    [routingRetryTimer invalidate];
+    routingRetryTimer = nil;
+    if (!pendingOutputUID || sourceStateRetryTimer)
+        return;
+    AudioDeviceID device = AudioDevice::audioDeviceIDForDeviceUID((__bridge CFStringRef)pendingOutputUID);
+    UInt32 alive = 0, size = sizeof(alive);
+    AudioObjectPropertyAddress address = {kAudioDevicePropertyDeviceIsAlive, kAudioObjectPropertyScopeGlobal, 0};
+    OSStatus status = device == kAudioObjectUnknown ? kAudioHardwareBadDeviceError
+        : AudioObjectGetPropertyData(device, &address, 0, NULL, &size, &alive);
+    // A hidden proxy may be published after the source's device-list notification.
+    if (status != noErr || !alive) {
+        if (++routingAttempts < 5) {
+            routingRetryTimer = [NSTimer scheduledTimerWithTimeInterval:1 target:self
+                selector:@selector(attemptPendingOutputSwitch) userInfo:nil repeats:NO];
+        } else {
+            NSLog(@"Error: automatic output switch failed; device %@ is unavailable (%d)", pendingOutputUID, status);
+            [self cancelPendingOutputSwitch];
+        }
+        return;
+    }
+    if (AudioDevice::defaultOutputDevice() != device) {
+        address.mSelector = kAudioHardwarePropertyDefaultOutputDevice;
+        status = AudioObjectSetPropertyData(kAudioObjectSystemObject, &address, 0, NULL, sizeof(device), &device);
+        if (status != noErr)
+            NSLog(@"Error: automatic output switch to %@ failed (%d)", pendingOutputUID, status);
+    }
+    [self cancelPendingOutputSwitch];
+}
+
+- (void)updateAutomaticRoutingForSourceUID:(NSString *)uid device:(AudioDeviceID)device {
+    BOOL sourceChanged = ![observedSourceUID isEqualToString:uid];
+    if (sourceChanged)
+        [self cancelPendingOutputSwitch];
+    if (device != observedSourceID) {
+        sourceStateAttempts = 0;
+        AudioObjectPropertyAddress address = {kAudioDevicePropertyDeviceIsAlive, kAudioObjectPropertyScopeGlobal, 0};
+        if (observedSourceID != kAudioObjectUnknown) {
+            OSStatus status = AudioObjectRemovePropertyListener(observedSourceID, &address, &onDevicesChanged,
+                                                               (__bridge void *)self);
+            if (status != noErr && status != kAudioHardwareBadObjectError)
+                NSLog(@"Error: unable to remove source connection listener (%d)", status);
+        }
+        observedSourceID = device;
+        if (device != kAudioObjectUnknown) {
+            OSStatus status = AudioObjectAddPropertyListener(device, &address, &onDevicesChanged, (__bridge void *)self);
+            if (status != noErr)
+                NSLog(@"Error: unable to monitor source connection state (%d)", status);
+        }
+    }
+    UInt32 alive = 0, size = sizeof(alive);
+    if (device != kAudioObjectUnknown) {
+        AudioObjectPropertyAddress address = {kAudioDevicePropertyDeviceIsAlive, kAudioObjectPropertyScopeGlobal, 0};
+        OSStatus status = AudioObjectGetPropertyData(device, &address, 0, NULL, &size, &alive);
+        if (status != noErr) {
+            NSLog(@"Error: unable to read source connection state (%d)", status);
+            if (++sourceStateAttempts < 5) {
+                sourceStateRetryTimer = [NSTimer scheduledTimerWithTimeInterval:1 target:self
+                    selector:@selector(refreshOutputDevices) userInfo:nil repeats:NO];
+            } else {
+                [self cancelPendingOutputSwitch];
+            }
+            return;
+        }
+    }
+    sourceStateAttempts = 0;
+    BOOL connected = device != kAudioObjectUnknown && alive != 0;
+    if (sourceChanged) {
+        observedSourceUID = [uid copy];
+        sourceWasConnected = connected;
+        return;
+    }
+    if (connected != sourceWasConnected) {
+        sourceWasConnected = connected;
+        [self cancelPendingOutputSwitch];
+        BOOL enabled = [[self routingDefaults] boolForKey:connected ? SwitchOnConnectKey : SwitchOnDisconnectKey];
+        if (enabled) {
+            pendingOutputUID = connected ? @kDevice_UID : [[self routingDefaults] stringForKey:FallbackDeviceUIDKey];
+            routingAttempts = 0;
+            if (!pendingOutputUID.length)
+                NSLog(@"Error: automatic output switch requires a fallback device selection");
+        }
+    }
+    if (!routingRetryTimer)
+        [self attemptPendingOutputSwitch];
+}
+
+- (IBAction)automaticSwitchingChanged:(id)sender {
+#pragma unused(sender)
+    [[self routingDefaults] setBool:self.switchOnConnectCheckbox.state == NSControlStateValueOn forKey:SwitchOnConnectKey];
+    [[self routingDefaults] setBool:self.switchOnDisconnectCheckbox.state == NSControlStateValueOn forKey:SwitchOnDisconnectKey];
+    [self cancelPendingOutputSwitch];
+}
+
+- (IBAction)fallbackDeviceSelected:(id)sender {
+#pragma unused(sender)
+    NSString *uid = self.fallbackDevicePopUp.selectedItem.representedObject;
+    if (!uid.length) {
+        NSLog(@"Error: select an available fallback output device");
+        return;
+    }
+    [[self routingDefaults] setObject:uid forKey:FallbackDeviceUIDKey];
+    [[self routingDefaults] setObject:self.fallbackDevicePopUp.selectedItem.title forKey:FallbackDeviceNameKey];
+    [self cancelPendingOutputSwitch];
 }
 
 - (NSString *)currentOutputDeviceBufferFrameSize {
