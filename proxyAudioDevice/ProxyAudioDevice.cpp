@@ -37,6 +37,13 @@ std::string CFStringToStdString(CFStringRef s) {
 
 #pragma mark The Interface
 
+static const AudioServerPlugInCustomPropertyInfo equalizerProperties[] = {
+    {Equalizer::settingsProperty, kAudioServerPlugInCustomPropertyDataTypeCFPropertyList,
+     kAudioServerPlugInCustomPropertyDataTypeNone},
+    {Equalizer::metersProperty, kAudioServerPlugInCustomPropertyDataTypeCFPropertyList,
+     kAudioServerPlugInCustomPropertyDataTypeNone}
+};
+
 static AudioServerPlugInDriverInterface gAudioServerPlugInDriverInterface = {
     NULL,
     ProxyAudioDevice::ProxyAudio_QueryInterface,
@@ -571,6 +578,7 @@ OSStatus ProxyAudioDevice::Initialize(AudioServerPlugInDriverRef inDriver, Audio
     outputDeviceBufferFrameSize = retrieveOutputDeviceBufferFrameSizeFromStorage();
     outputDeviceActiveCondition = retrieveOutputDeviceActiveConditionFromStorage();
     outputDeviceHideWhenUnavailable = retrieveOutputDeviceHideWhenUnavailableFromStorage();
+    loadEqualizerSettings();
 
     //    calculate the host ticks per frame
     struct mach_timebase_info theTimeBaseInfo;
@@ -725,12 +733,22 @@ OSStatus ProxyAudioDevice::PerformDeviceConfigurationChange(AudioServerPlugInDri
                    Done,
                    "ProxyAudio_PerformDeviceConfigurationChange: bad sample rate");
 
-    //    lock the state mutex
+    // Prepare coefficients without holding the audio callback's state lock.
     {
+        CAMutex::Locker settingsLocker(equalizerSettingsMutex);
+        Equalizer::Settings settings;
+        UInt64 revision;
+        {
+            CAMutex::Locker locker(stateMutex);
+            settings = equalizerSettings;
+            revision = equalizerPlan.revision + 1;
+        }
+        Equalizer::Plan plan = Equalizer::makePlan(settings, inChangeAction, revision);
         CAMutex::Locker locker(stateMutex);
 
         //    change the sample rate
         gDevice_SampleRate = inChangeAction;
+        equalizerPlan = plan;
         DebugMsg("ProxyAudio: Setting sample rate to: %llu", inChangeAction);
 
         //    recalculate the state that depends on the sample rate
@@ -1651,6 +1669,13 @@ Boolean ProxyAudioDevice::HasBoxProperty(AudioServerPlugInDriverRef inDriver,
     FailIf(inAddress == NULL, Done, "HasBoxProperty: no address");
     FailIf(inObjectID != kObjectID_Box, Done, "HasBoxProperty: not the box object");
 
+    if (inAddress->mSelector == kAudioObjectPropertyCustomPropertyInfoList
+        || inAddress->mSelector == Equalizer::settingsProperty
+        || inAddress->mSelector == Equalizer::metersProperty) {
+        return inAddress->mScope == kAudioObjectPropertyScopeGlobal
+            && inAddress->mElement == kAudioObjectPropertyElementMaster;
+    }
+
     //    Note that for each object, this driver implements all the required properties plus a few
     //    extras that are useful but not required. There is more detailed commentary about each
     //    property in the GetBoxPropertyData() method.
@@ -1710,6 +1735,13 @@ OSStatus ProxyAudioDevice::IsBoxPropertySettable(AudioServerPlugInDriverRef inDr
                    theAnswer = kAudioHardwareBadObjectError,
                    Done,
                    "IsBoxPropertySettable: not the plug-in object");
+
+    if (inAddress->mSelector == kAudioObjectPropertyCustomPropertyInfoList
+        || inAddress->mSelector == Equalizer::settingsProperty
+        || inAddress->mSelector == Equalizer::metersProperty) {
+        *outIsSettable = inAddress->mSelector == Equalizer::settingsProperty;
+        return noErr;
+    }
 
     //    Note that for each object, this driver implements all the required properties plus a few
     //    extras that are useful but not required. There is more detailed commentary about each
@@ -1778,6 +1810,15 @@ OSStatus ProxyAudioDevice::GetBoxPropertyDataSize(AudioServerPlugInDriverRef inD
                    theAnswer = kAudioHardwareBadObjectError,
                    Done,
                    "GetBoxPropertyDataSize: not the plug-in object");
+
+    if (inAddress->mSelector == kAudioObjectPropertyCustomPropertyInfoList) {
+        *outDataSize = sizeof(equalizerProperties);
+        return noErr;
+    }
+    if (inAddress->mSelector == Equalizer::settingsProperty || inAddress->mSelector == Equalizer::metersProperty) {
+        *outDataSize = sizeof(CFPropertyListRef);
+        return noErr;
+    }
 
     //    Note that for each object, this driver implements all the required properties plus a few
     //    extras that are useful but not required. There is more detailed commentary about each
@@ -1902,6 +1943,30 @@ OSStatus ProxyAudioDevice::GetBoxPropertyData(AudioServerPlugInDriverRef inDrive
                    theAnswer = kAudioHardwareBadObjectError,
                    Done,
                    "GetBoxPropertyData: not the plug-in object");
+
+    if (inAddress->mSelector == kAudioObjectPropertyCustomPropertyInfoList) {
+        const UInt32 count = std::min<UInt32>(inDataSize / sizeof(AudioServerPlugInCustomPropertyInfo), 2);
+        *outDataSize = count * sizeof(AudioServerPlugInCustomPropertyInfo);
+        memcpy(outData, equalizerProperties, *outDataSize);
+        return noErr;
+    }
+    if (inAddress->mSelector == Equalizer::settingsProperty || inAddress->mSelector == Equalizer::metersProperty) {
+        if (inDataSize < sizeof(CFPropertyListRef))
+            return kAudioHardwareBadPropertySizeError;
+        CFDataRef data;
+        if (inAddress->mSelector == Equalizer::settingsProperty) {
+            CAMutex::Locker locker(stateMutex);
+            data = CFDataCreate(NULL, reinterpret_cast<const UInt8 *>(&equalizerSettings), sizeof(equalizerSettings));
+        } else {
+            const Equalizer::Meters meters = equalizer.meters();
+            data = CFDataCreate(NULL, reinterpret_cast<const UInt8 *>(&meters), sizeof(meters));
+        }
+        if (!data)
+            return kAudioHardwareUnspecifiedError;
+        *static_cast<CFPropertyListRef *>(outData) = data;
+        *outDataSize = sizeof(CFPropertyListRef);
+        return noErr;
+    }
 
     //    Note that for each object, this driver implements all the required properties plus a few
     //    extras that are useful but not required.
@@ -2182,6 +2247,17 @@ OSStatus ProxyAudioDevice::SetBoxPropertyData(AudioServerPlugInDriverRef inDrive
 
     //    initialize the returned number of changed properties
     *outNumberPropertiesChanged = 0;
+
+    if (inAddress->mSelector == Equalizer::settingsProperty) {
+        if (inDataSize != sizeof(CFPropertyListRef) || !inData)
+            return kAudioHardwareBadPropertySizeError;
+        theAnswer = setEqualizerSettings(*static_cast<const CFPropertyListRef *>(inData));
+        if (theAnswer == noErr) {
+            *outNumberPropertiesChanged = 1;
+            outChangedAddresses[0] = *inAddress;
+        }
+        return theAnswer;
+    }
 
     //    Note that for each object, this driver implements all the required properties plus a few
     //    extras that are useful but not required. There is more detailed commentary about each
@@ -5000,6 +5076,7 @@ void ProxyAudioDevice::setupAudioDevicesListener() {
 void ProxyAudioDevice::resetInputData() {
     DebugMsg("ProxyAudio: resetInputData");
     CAMutex::Locker locker(&IOMutex);
+    equalizer.reset();
     
     if (inputBuffer) {
         inputBuffer->Clear();
@@ -5385,6 +5462,7 @@ OSStatus ProxyAudioDevice::outputDeviceIOProc(AudioDeviceID inDevice,
     UInt32 currentInputDeviceChannelCount;
     Float32 currentVolumeR, currentVolumeL;
     bool currentMute;
+    Equalizer::Plan currentEqualizerPlan;
 
     {
         CAMutex::Locker stateLocker(&stateMutex);
@@ -5393,6 +5471,7 @@ OSStatus ProxyAudioDevice::outputDeviceIOProc(AudioDeviceID inDevice,
         currentVolumeR = gVolume_Output_R_Value;
         currentVolumeL = gVolume_Output_L_Value;
         currentMute = gMute_Output_Mute;
+        currentEqualizerPlan = equalizerPlan;
     }
     
     {
@@ -5437,11 +5516,19 @@ OSStatus ProxyAudioDevice::outputDeviceIOProc(AudioDeviceID inDevice,
 
     expectedOutputSampleTime = inOutputTime->mSampleTime + framesThisCycle;
 
+    if (framesThisCycle > kDevice_RingBufferSize * 2) {
+        equalizer.clearMeters();
+        syslog(LOG_ERR, "ProxyAudio: output buffer exceeds work buffer capacity (%u frames)", framesThisCycle);
+        return kAudioHardwareBadPropertySizeError;
+    }
+
     if (lastInputFrameTime < 0 || lastInputBufferFrameSize < 0) {
+        equalizer.clearMeters();
         return noErr;
     }
 
     if (currentOutputDeviceSampleRate != currentInputDeviceSampleRate) {
+        equalizer.clearMeters();
         DebugMsg("ProxyAudio: cannot play, mismatched sample rate");
         return noErr;
     }
@@ -5456,6 +5543,7 @@ OSStatus ProxyAudioDevice::outputDeviceIOProc(AudioDeviceID inDevice,
     }
 
     if (inputFinalFrameTime != -1 && startFrame >= inputFinalFrameTime) {
+        equalizer.clearMeters();
         return noErr;
     }
 
@@ -5487,7 +5575,7 @@ OSStatus ProxyAudioDevice::outputDeviceIOProc(AudioDeviceID inDevice,
         }
     }
 
-    bool overrun = inputBuffer->Fetch(workBuffer, currentOutputDeviceBufferFrameSize, (SInt64)startFrame);
+    bool overrun = inputBuffer->Fetch(workBuffer, framesThisCycle, (SInt64)startFrame);
 
     if (overrun && inputFinalFrameTime == -1 && startFrame >= inputBuffer->mStartFrame) {
         // Since this warning could conceivably happen every cycle, explicitly make it
@@ -5507,6 +5595,9 @@ OSStatus ProxyAudioDevice::outputDeviceIOProc(AudioDeviceID inDevice,
         }
     }
     
+    equalizer.setPlan(currentEqualizerPlan);
+    equalizer.process(reinterpret_cast<float *>(workBuffer), framesThisCycle);
+
     Float32 volumeFactorL = 1.0, volumeFactorR = 1.0;
     calculateVolumeFactors(currentVolumeL, currentVolumeR, currentMute, volumeFactorL, volumeFactorR);
 
@@ -5535,6 +5626,7 @@ Float64 ProxyAudioDevice::anchorInputOutputSampleDelta(const AudioTimeStamp *out
                                                        UInt32 safetyOffset) {
     // Must be called with IOMutex held. Positions the read position the usual distance behind the
     // newest input data and makes that the fill level the proxy clock servo will try to hold.
+    equalizer.reset();
     Float64 startFrame =
         lastInputFrameTime - lastInputBufferFrameSize - (Float64)outputBufferFrameSize - (Float64)safetyOffset;
     inputOutputSampleDelta = startFrame - outputTime->mSampleTime;
@@ -5705,6 +5797,63 @@ void ProxyAudioDevice::parseConfigurationString(CFStringRef configString, Config
 
 #pragma mark Driver Configuration
 
+void ProxyAudioDevice::loadEqualizerSettings() {
+    CFPropertyListSmartRef stored;
+    OSStatus status = gPlugIn_Host->CopyFromStorage(gPlugIn_Host, CFSTR("equalizerSettings"), &stored);
+    if (status != noErr) {
+        syslog(LOG_NOTICE, "ProxyAudio: no stored equalizer settings (%d); using bypass", status);
+        return;
+    }
+    if (!stored.ref())
+        return;
+    if (CFGetTypeID(stored.ref()) != CFDataGetTypeID()
+        || CFDataGetLength(static_cast<CFDataRef>(stored.ref())) != sizeof(Equalizer::Settings)) {
+        syslog(LOG_WARNING, "ProxyAudio: invalid stored equalizer settings; using bypass");
+        return;
+    }
+    Equalizer::Settings settings;
+    memcpy(&settings, CFDataGetBytePtr(static_cast<CFDataRef>(stored.ref())), sizeof(settings));
+    if (!Equalizer::validSettings(settings)) {
+        syslog(LOG_WARNING, "ProxyAudio: unsupported stored equalizer settings; using bypass");
+        return;
+    }
+    equalizerSettings = settings;
+    equalizerPlan = Equalizer::makePlan(settings, gDevice_SampleRate, equalizerPlan.revision + 1);
+}
+
+OSStatus ProxyAudioDevice::setEqualizerSettings(CFPropertyListRef data) {
+    if (!data || CFGetTypeID(data) != CFDataGetTypeID())
+        return kAudioHardwareIllegalOperationError;
+    CFDataRef bytes = static_cast<CFDataRef>(data);
+    if (CFDataGetLength(bytes) != sizeof(Equalizer::Settings))
+        return kAudioHardwareBadPropertySizeError;
+    Equalizer::Settings settings;
+    memcpy(&settings, CFDataGetBytePtr(bytes), sizeof(settings));
+    if (!Equalizer::validSettings(settings))
+        return kAudioHardwareIllegalOperationError;
+
+    CAMutex::Locker settingsLocker(equalizerSettingsMutex);
+    OSStatus status = gPlugIn_Host->WriteToStorage(gPlugIn_Host, CFSTR("equalizerSettings"), data);
+    if (status != noErr) {
+        syslog(LOG_ERR, "ProxyAudio: could not save equalizer settings (%d)", status);
+        return status;
+    }
+    Float64 sampleRate;
+    UInt64 revision;
+    {
+        CAMutex::Locker locker(stateMutex);
+        sampleRate = gDevice_SampleRate;
+        revision = equalizerPlan.revision + 1;
+    }
+    Equalizer::Plan plan = Equalizer::makePlan(settings, sampleRate, revision);
+    {
+        CAMutex::Locker locker(stateMutex);
+        equalizerSettings = settings;
+        equalizerPlan = plan;
+    }
+    return noErr;
+}
+
 void ProxyAudioDevice::setConfigurationValue(ConfigType type, CFStringRef value) {
     switch (type) {
         case ConfigType::outputDevice:
@@ -5771,18 +5920,21 @@ CFStringRef ProxyAudioDevice::copyDeviceNameFromStorage()
     
     gPlugIn_Host->CopyFromStorage(gPlugIn_Host, CFSTR("deviceName"), &data);
     
-    if (data != NULL && CFGetTypeID(data) == CFStringGetTypeID()) {
+    if (data != NULL && CFGetTypeID(data) == CFStringGetTypeID()
+        && CFStringCompare(CFStringRef(CFPropertyListRef(data)), CFSTR("Proxy Audio Device"), 0) != kCFCompareEqualTo) {
         result = CFStringCreateCopy(NULL, CFStringRef(CFPropertyListRef(data)));
     }
 
     if (result == NULL) {
         CFBundleRef bundle = CFBundleGetBundleWithIdentifier(CFSTR(kPlugIn_BundleID));
-        result = CFBundleCopyLocalizedString(
-            bundle, CFSTR("DeviceName"), CFSTR("Proxy Audio Device"), CFSTR("Localizable"));
+        if (bundle) {
+            result = CFBundleCopyLocalizedString(
+                bundle, CFSTR("DeviceName"), CFSTR("Equalizer Audio"), CFSTR("Localizable"));
+        }
     }
 
     if (result == NULL) {
-        result = CFStringCreateCopy(NULL, CFSTR("Proxy Audio Device"));
+        result = CFStringCreateCopy(NULL, CFSTR("Equalizer Audio"));
     }
     
     DebugMsg("ProxyAudio: copyDeviceNameFromStorage finished");
